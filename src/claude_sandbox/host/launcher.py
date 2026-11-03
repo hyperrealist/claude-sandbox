@@ -45,6 +45,17 @@ PYTHON = "/usr/libexec/claude-sandbox/venv/bin/python"
 TMUX = "/usr/bin/tmux"
 DETACHED_SID = "tmux"
 DETACHED_SESSION = "agent"
+# What makes an agent usable inside tmux. A pane's TERM is "screen" unless
+# told otherwise, which costs the agent its colours, and tmux's history is the
+# only scrollback there is (the wheel scrolls it with the mouse on).
+TMUX_SETTINGS = (
+    ("set-option", "-g", "mouse", "on"),
+    ("set-option", "-g", "history-limit", "50000"),
+    ("set-option", "-g", "default-terminal", "tmux-256color"),
+    ("set-option", "-sa", "terminal-features", ",*:RGB"),
+    ("set-option", "-g", "set-clipboard", "on"),
+    ("set-environment", "-g", "COLORTERM", "truecolor"),
+)
 # How long a new tmux server has to start answering.
 SERVER_WAIT = 5.0
 # What a closed terminal (or a polite kill) sends the launcher.
@@ -661,6 +672,15 @@ class Launcher:
             time.sleep(0.1)
         return False
 
+    def configure_tmux(self) -> None:
+        """Apply :data:`TMUX_SETTINGS`, in one command sequence; they take
+        effect for the sessions made after this. Only a note when it fails."""
+        chain: list[str] = []
+        for setting in TMUX_SETTINGS:
+            chain += [*setting, ";"]
+        if self.call("exec", self.name, TMUX, *chain[:-1], quiet=True):
+            self.warn("could not set tmux's colour and scrolling options")
+
     def tracked_or_refuse(self) -> bool:
         """Detached sessions rest on the session records of a 5.x image."""
         if self.bash_era()[0]:
@@ -688,6 +708,7 @@ class Launcher:
         if not self.serve():
             say(f"the tmux server did not start in {self.name}")
             return 1
+        self.configure_tmux()
         start = ("exec", self.name, TMUX, "new-session", "-d", "-s", DETACHED_SESSION)
         if rc := self.call(*start, *command):
             say(f"cannot start the detached session in {self.name}")

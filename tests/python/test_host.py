@@ -38,6 +38,7 @@ class Engine:
         self.status = 0
         self.others = "0"  # live sessions `sessions.py end` reports
         self.has_tmux = True  # the image ships tmux
+        self.settings_rc = 0  # the answer to applying tmux's settings
         self.tmux = False  # a tmux server answers in the container
         self.tmux_starts = True  # ... once `start` has been exec'd
         self.server_rc = 0  # the engine's answer to starting that server
@@ -86,6 +87,8 @@ class Engine:
             case ["exec", _, launcher.TMUX, "has-session", *_]:
                 rc = 0 if self.session else 1
                 out = ""
+            case ["exec", _, launcher.TMUX, "set-option", *_]:
+                rc = self.settings_rc
             case ["exec", _, launcher.TMUX, "new-session", *_]:
                 rc = self.new_session_rc
                 self.session = rc == 0
@@ -769,3 +772,32 @@ def test_detach_says_so_when_the_image_has_no_tmux(
     err = capsys.readouterr().err
     assert "has no tmux" in err and "CLAUDE_SANDBOX_IMAGE" in err
     assert not [c for c in engine.called("exec") if c[1] == "-d"]
+
+
+def test_tmux_gets_colour_and_scrolling_settings_before_the_agent_starts(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = detached(engine, monkeypatch)
+    assert r.detach(["claude"]) == 0
+    calls = [c for c in engine.called("exec") if launcher.TMUX in c]
+    verbs = [c[3] for c in calls]
+    assert verbs.index("set-option") < verbs.index("new-session")
+    (settings,) = [c for c in calls if c[3] == "set-option"]
+    # One command sequence: a lone ";" between settings, none at the ends.
+    chain = settings[3:]
+    assert chain[0] == "set-option" and chain[-1] != ";"
+    assert chain.count(";") == len(launcher.TMUX_SETTINGS) - 1
+    for words in (("mouse", "on"), ("default-terminal", "tmux-256color")):
+        assert all(w in chain for w in words)
+    assert "COLORTERM" in chain and "truecolor" in chain
+
+
+def test_failing_tmux_settings_only_warn(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine.settings_rc = 1
+    r = detached(engine, monkeypatch)
+    assert r.detach(["claude"]) == 0
+    assert (
+        "could not set tmux's colour and scrolling options" in capsys.readouterr().err
+    )
