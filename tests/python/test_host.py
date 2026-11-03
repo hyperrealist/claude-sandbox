@@ -37,6 +37,7 @@ class Engine:
         self.starts = True
         self.status = 0
         self.others = "0"  # live sessions `sessions.py end` reports
+        self.has_tmux = True  # the image ships tmux
         self.tmux = False  # a tmux server answers in the container
         self.tmux_starts = True  # ... once `start` has been exec'd
         self.server_rc = 0  # the engine's answer to starting that server
@@ -78,6 +79,8 @@ class Engine:
             case ["exec", "-d", _, launcher.PYTHON, "-I", "-c", _, "start", *_]:
                 self.tmux = self.tmux_starts and not self.server_rc
                 rc = self.server_rc
+            case ["exec", _, launcher.TMUX, "-V"]:
+                rc = 0 if self.has_tmux else 127
             case ["exec", _, launcher.TMUX, "show-options", *_]:
                 rc = 0 if self.tmux else 1
             case ["exec", _, launcher.TMUX, "has-session", *_]:
@@ -756,3 +759,13 @@ def test_halt_with_nothing_running_does_nothing(
     assert run().halt() == 0
     assert not engine.called("exec")
     assert "is not running" in capsys.readouterr().err
+
+
+def test_detach_says_so_when_the_image_has_no_tmux(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine.has_tmux = False
+    assert detached(engine, monkeypatch).detach(["claude"]) == 1
+    err = capsys.readouterr().err
+    assert "has no tmux" in err and "CLAUDE_SANDBOX_IMAGE" in err
+    assert not [c for c in engine.called("exec") if c[1] == "-d"]

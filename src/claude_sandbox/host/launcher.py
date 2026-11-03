@@ -673,6 +673,11 @@ class Launcher:
         self.ensure(pause=False)
         if not self.tracked_or_refuse():
             return 1
+        if self.call("exec", self.name, TMUX, "-V", quiet=True):
+            say(f"{self.image} has no tmux, which detached sessions need")
+            note("image", "build this fork's Dockerfile and set CLAUDE_SANDBOX_IMAGE")
+            note("then", f"{self.self_name} --recreate detach")
+            return 1
         if self.tmux_up() and (
             self.out("exec", self.name, TMUX, "has-session", "-t", DETACHED_SESSION)
             is not None
