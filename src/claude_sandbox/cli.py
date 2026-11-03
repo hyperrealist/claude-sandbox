@@ -57,6 +57,9 @@ COMMANDS = {
         Command(host.codex, rest, raw=True),
         Command(host.pi, rest, raw=True),
         Command(host.shell, rest, raw=True),
+        Command(host.detach, rest, raw=True),
+        Command(host.attach, rest, raw=True),
+        Command(host.halt, rest, raw=True),
         Command(host.clean, host.clean_arguments),
         Command(helpers.gh_auth, helpers.gh_auth_arguments),
         Command(helpers.glab_auth, helpers.glab_auth_arguments),
@@ -87,6 +90,10 @@ Only --bridge, --peers, --gpu, --device, --mount and --mount-rw are fixed
 when the container is created (--recreate to change them). Words after the
 options that are not a command go to claude: `claude-sandbox --resume`.
 Helpers run inside the project container, as its installed claude-sandbox.
+
+Detached sessions: `detach [claude|codex|pi] [ARGS]` runs the agent in a tmux
+session inside the container that survives this terminal closing; `attach`
+joins it, `halt` ends it and stops an idle container.
 
 Environment: CLAUDE_SANDBOX_IMAGE, CLAUDE_SANDBOX_ENGINE (podman|docker),
 CLAUDE_SANDBOX_SHARED_CONFIG, CLAUDE_SANDBOX_CONF, CLAUDE_SANDBOX_SHELL,

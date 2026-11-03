@@ -63,6 +63,30 @@ def shell(ns: argparse.Namespace) -> int:
     return session(ns, command, pause=False)
 
 
+AGENTS = ("claude", "codex", "pi")
+
+
+@requires(HOST)
+def detach(ns: argparse.Namespace) -> int:
+    """an agent in a tmux session that outlives this terminal (default claude)"""
+    tail = options(ns).tail
+    name, args = (tail[0], tail[1:]) if tail and tail[0] in AGENTS else ("claude", tail)
+    command = [f"{launcher.IN_CONTAINER}/{name}", *args]
+    return launcher.launcher(options(ns)).detach(command)
+
+
+@requires(HOST)
+def attach(ns: argparse.Namespace) -> int:
+    """join the detached agent session (leaving it ends only this client)"""
+    return launcher.launcher(options(ns)).attach()
+
+
+@requires(HOST)
+def halt(ns: argparse.Namespace) -> int:
+    """end the detached agent session and stop the container if it is idle"""
+    return launcher.launcher(options(ns)).halt()
+
+
 def clean_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--force", action="store_true", help="also remove running ones")
     p.add_argument("--images", action="store_true", help="also remove unused tags")

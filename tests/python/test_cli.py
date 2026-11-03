@@ -48,6 +48,18 @@ def sessions(monkeypatch: pytest.MonkeyPatch) -> Sessions:
             started.append((command, pause, self.opts))
             return 7
 
+        def detach(self, command: list[str]) -> int:
+            started.append((["detach", *command], False, self.opts))
+            return 4
+
+        def attach(self) -> int:
+            started.append((["attach"], False, self.opts))
+            return 5
+
+        def halt(self) -> int:
+            started.append((["halt"], False, self.opts))
+            return 6
+
         def clean(self, force: bool, images: bool) -> None:
             started.append((["clean", str(force), str(images)], False, self.opts))
 
@@ -81,6 +93,25 @@ def test_host_commands(
     rc = cli.main(argv)
     assert sessions[0][:2] == (command, pause)
     assert rc == (0 if command[0] == "clean" else 7)
+    assert sessions[0][2].recreate == ("--recreate" in argv)
+
+
+@pytest.mark.parametrize(
+    ("argv", "command", "rc"),
+    [
+        (["detach"], ["detach", f"{BIN}/claude"], 4),
+        (["detach", "--resume"], ["detach", f"{BIN}/claude", "--resume"], 4),
+        (["detach", "codex", "-p", "hi"], ["detach", f"{BIN}/codex", "-p", "hi"], 4),
+        (["--recreate", "detach", "pi"], ["detach", f"{BIN}/pi"], 4),
+        (["attach"], ["attach"], 5),
+        (["halt"], ["halt"], 6),
+    ],
+)  # fmt: skip
+def test_detached_session_commands(
+    sessions: Sessions, argv: list[str], command: list[str], rc: int
+) -> None:
+    assert cli.main(argv) == rc
+    assert sessions[0][0] == command
     assert sessions[0][2].recreate == ("--recreate" in argv)
 
 

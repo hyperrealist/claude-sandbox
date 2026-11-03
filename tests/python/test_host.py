@@ -37,6 +37,11 @@ class Engine:
         self.starts = True
         self.status = 0
         self.others = "0"  # live sessions `sessions.py end` reports
+        self.tmux = False  # a tmux server answers in the container
+        self.tmux_starts = True  # ... once `start` has been exec'd
+        self.server_rc = 0  # the engine's answer to starting that server
+        self.session = False  # the detached tmux session exists
+        self.new_session_rc = 0
 
     def add(self, name: str, running: bool = False) -> dict[str, str]:
         ctr = {RUNNING: str(running).lower(), KEEPER: launcher.KEEPER_CMD}
@@ -70,6 +75,17 @@ class Engine:
                 out = self.listing["find"]
             case ["exec", _, launcher.PYTHON, "-I", "-c", _, "end", _]:
                 out = self.others
+            case ["exec", "-d", _, launcher.PYTHON, "-I", "-c", _, "start", *_]:
+                self.tmux = self.tmux_starts and not self.server_rc
+                rc = self.server_rc
+            case ["exec", _, launcher.TMUX, "show-options", *_]:
+                rc = 0 if self.tmux else 1
+            case ["exec", _, launcher.TMUX, "has-session", *_]:
+                rc = 0 if self.session else 1
+                out = ""
+            case ["exec", _, launcher.TMUX, "new-session", *_]:
+                rc = self.new_session_rc
+                self.session = rc == 0
             case _:
                 pass
         rc = 1 if out is None and args[1:2] == ["inspect"] and "-f" in args else rc
@@ -599,3 +615,144 @@ def test_detach_leaves_the_parent_and_starts_a_session(
         except SystemExit:
             pass
     assert calls == [129, "setsid"]
+
+
+# --- detached sessions ---------------------------------------------------------
+
+
+def detached(engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Launcher:
+
+    def sleep(seconds: float) -> None:
+        pass
+
+    monkeypatch.setattr(launcher.time, "sleep", sleep)
+    return run()
+
+
+def test_detach_starts_the_server_as_a_session_then_the_agent(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r = detached(engine, monkeypatch)
+    assert r.detach(["/usr/local/bin/claude", "--resume"]) == 0
+    server = next(c for c in engine.called("exec") if c[1] == "-d")
+    # Recorded by sessions.py, so that `end` counts it and the keeper runs on.
+    assert server[2:5] == [r.name, launcher.PYTHON, "-I"]
+    assert server[7:] == ["start", launcher.DETACHED_SID, launcher.TMUX, "-D"]
+    last = engine.called("exec")[-1]
+    assert last == [
+        *["exec", r.name, launcher.TMUX, "new-session", "-d", "-s", "agent"],
+        "/usr/local/bin/claude",
+        "--resume",
+    ]
+    assert not engine.called("stop")
+    err = capsys.readouterr().err
+    assert "started a detached session" in err and "claude-sandbox attach" in err
+
+
+def test_detach_reuses_a_running_server(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine.tmux = True
+    r = detached(engine, monkeypatch)
+    assert r.detach(["claude"]) == 0
+    assert not [c for c in engine.called("exec") if c[1] == "-d"]
+
+
+def test_detach_waits_for_a_slow_server(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = detached(engine, monkeypatch)
+    answers = iter([False, False, False, True])
+    monkeypatch.setattr(r, "tmux_up", lambda: next(answers))
+    assert r.serve()
+
+
+def test_detach_gives_up_on_a_server_that_never_answers(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine.tmux_starts = False
+    r = detached(engine, monkeypatch)
+    ticks = iter(range(0, 100, 3))
+    monkeypatch.setattr(launcher.time, "monotonic", lambda: float(next(ticks)))
+    assert r.detach(["claude"]) == 1
+    assert "tmux server did not start" in capsys.readouterr().err
+
+
+def test_detach_stops_when_the_engine_cannot_run_the_server(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine.server_rc = 125
+    assert detached(engine, monkeypatch).detach(["claude"]) == 1
+
+
+def test_detach_refuses_a_second_session(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine.tmux = engine.session = True
+    assert detached(engine, monkeypatch).detach(["claude"]) == 1
+    assert "already has a detached session" in capsys.readouterr().err
+    assert not [c for c in engine.called("exec") if "new-session" in c]
+
+
+def test_detach_reports_a_failed_agent_start(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    engine.new_session_rc = 7
+    assert detached(engine, monkeypatch).detach(["claude"]) == 7
+    assert "cannot start the detached session" in capsys.readouterr().err
+
+
+def test_detached_sessions_need_a_5x_container(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r = detached(engine, monkeypatch)
+    engine.add(r.name, running=True)[LABEL] = "4.8.0"
+    assert r.detach(["claude"]) == 1
+    assert r.halt() == 1
+    assert "runs the 4.x bash sandbox" in capsys.readouterr().err
+
+
+def test_attach_is_a_tracked_session_running_tmux_attach(engine: Engine) -> None:
+    r = run()
+    assert r.attach() == 0
+    session = engine.called("exec")[0]
+    assert session[-4:] == [launcher.TMUX, "attach-session", "-t", "agent"]
+
+
+def test_leaving_an_attach_keeps_the_container_while_the_server_lives(
+    engine: Engine,
+) -> None:
+    engine.others = "1"  # the tmux server's own record
+    assert run().attach() == 0
+    assert not engine.called("stop")
+
+
+def test_halt_ends_the_server_and_stops_an_idle_container(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r = run()
+    engine.add(r.name, running=True)
+    assert r.halt() == 0
+    (end,) = engine.called("exec")
+    assert end[-2:] == ["end", launcher.DETACHED_SID]
+    assert engine.called("stop")
+    assert "ended the detached sessions" in capsys.readouterr().err
+
+
+def test_halt_leaves_a_container_with_other_sessions_running(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r = run()
+    engine.add(r.name, running=True)
+    engine.others = "2"
+    assert r.halt() == 0
+    assert not engine.called("stop")
+    assert "other sessions still live" in capsys.readouterr().err
+
+
+def test_halt_with_nothing_running_does_nothing(
+    engine: Engine, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run().halt() == 0
+    assert not engine.called("exec")
+    assert "is not running" in capsys.readouterr().err

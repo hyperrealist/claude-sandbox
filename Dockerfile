@@ -61,7 +61,7 @@ WORKDIR /opt/claude-sandbox
 # and the installer never has to trust the base image's unpinned one.
 RUN bash .devcontainer/claude-sandbox/install.sh --image-build \
     && rm -rf /usr/libexec/claude-sandbox/uv \
-    && apt-get install -y --no-install-recommends vim \
+    && apt-get install -y --no-install-recommends tmux vim \
     && rm -rf /var/lib/apt/lists/*
 
 # Python for the agent — IMAGE-ONLY by design. The devcontainer stage and

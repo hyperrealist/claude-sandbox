@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Mapping
 
 from .. import release_tag
@@ -37,6 +38,15 @@ IN_CONTAINER = "/usr/local/bin"
 SH = "/bin/sh"
 # The image's root-owned interpreter, which runs host/sessions.py inside.
 PYTHON = "/usr/libexec/claude-sandbox/venv/bin/python"
+# The detached agent's tmux (installed in the image): a server run in the
+# foreground (-D, which also turns exit-empty off) under sessions.start, so
+# it is a live recorded session and keeps the container running; the agent
+# is one tmux session in it.
+TMUX = "/usr/bin/tmux"
+DETACHED_SID = "tmux"
+DETACHED_SESSION = "agent"
+# How long a new tmux server has to start answering.
+SERVER_WAIT = 5.0
 # What a closed terminal (or a polite kill) sends the launcher.
 HANGUPS = (signal.SIGHUP, signal.SIGTERM)
 # The `shell` verb: the user's shell, looked up on a fixed PATH, if the image
@@ -576,8 +586,8 @@ class Launcher:
 
     # --- the session ----------------------------------------------------------
 
-    def session(self, command: list[str], *, pause: bool) -> int:
-        """Create or reuse the container, then exec ``command`` in it."""
+    def ensure(self, *, pause: bool) -> None:
+        """Create or reuse the project container and make sure it runs."""
         if self.opts.recreate and self.exists(self.name):
             self.must("rm", "-f", self.name)
         if self.exists(self.name):
@@ -595,6 +605,10 @@ class Launcher:
         # An agent redraws the terminal at once: hold a warning for a key.
         if pause and self.warned and os.isatty(0) and os.isatty(2):
             wait_for_key()
+
+    def session(self, command: list[str], *, pause: bool) -> int:
+        """Create or reuse the container, then exec ``command`` in it."""
+        self.ensure(pause=pause)
         # A 4.x image has no interpreter to track sessions with.
         tracked = not self.bash_era()[0]
         sid = secrets.token_hex(8)
@@ -624,6 +638,82 @@ class Launcher:
             if handler is not None:
                 signal.signal(s, handler)
         return rc
+
+    # --- detached sessions ----------------------------------------------------
+
+    def tmux_up(self) -> bool:
+        """Whether the container's tmux server answers (it is not started by
+        asking: show-options does not start one)."""
+        return self.call("exec", self.name, TMUX, "show-options", "-g", quiet=True) == 0
+
+    def serve(self) -> bool:
+        """Make sure the tmux server runs, recorded as a session so that
+        ``end`` counts it; whether it is answering."""
+        if self.tmux_up():
+            return True
+        server = (PYTHON, "-I", "-c", session_code(), "start", DETACHED_SID, TMUX, "-D")
+        if self.call("exec", "-d", self.name, *server):
+            return False
+        deadline = time.monotonic() + SERVER_WAIT
+        while time.monotonic() < deadline:
+            if self.tmux_up():
+                return True
+            time.sleep(0.1)
+        return False
+
+    def tracked_or_refuse(self) -> bool:
+        """Detached sessions rest on the session records of a 5.x image."""
+        if self.bash_era()[0]:
+            say(f"{self.name} runs the 4.x bash sandbox: --recreate it first")
+            return False
+        return True
+
+    def detach(self, command: list[str]) -> int:
+        """Start ``command`` in a tmux session that outlives this terminal."""
+        self.ensure(pause=False)
+        if not self.tracked_or_refuse():
+            return 1
+        if self.tmux_up() and (
+            self.out("exec", self.name, TMUX, "has-session", "-t", DETACHED_SESSION)
+            is not None
+        ):
+            say(f"{self.name} already has a detached session")
+            note("attach", f"{self.self_name} attach")
+            return 1
+        if not self.serve():
+            say(f"the tmux server did not start in {self.name}")
+            return 1
+        start = ("exec", self.name, TMUX, "new-session", "-d", "-s", DETACHED_SESSION)
+        if rc := self.call(*start, *command):
+            say(f"cannot start the detached session in {self.name}")
+            return rc
+        say(f"started a detached session in {self.name}")
+        note("attach", f"{self.self_name} attach")
+        note("end", f"{self.self_name} halt")
+        return 0
+
+    def attach(self) -> int:
+        """Join the detached session; leaving it (or losing the terminal)
+        ends only this client."""
+        return self.session(
+            [TMUX, "attach-session", "-t", DETACHED_SESSION], pause=False
+        )
+
+    def halt(self) -> int:
+        """End the detached sessions: hang up the tmux server and everything
+        under it, and stop the container if nothing else lives in it."""
+        if not self.running():
+            say(f"{self.name} is not running")
+            return 0
+        if not self.tracked_or_refuse():
+            return 1
+        stopped = self.idle_after(DETACHED_SID, True)
+        if stopped:
+            self.call("stop", "-t", "2", self.name, quiet=True)
+        say(f"ended the detached sessions in {self.name}")
+        if not stopped:
+            note("running", "other sessions still live in the container")
+        return 0
 
     def idle_after(self, sid: str, tracked: bool) -> bool:
         """End session ``sid`` inside (its client may be gone while it runs
