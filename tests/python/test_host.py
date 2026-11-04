@@ -790,6 +790,7 @@ def test_tmux_gets_colour_and_scrolling_settings_before_the_agent_starts(
     for words in (("mouse", "on"), ("default-terminal", "tmux-256color")):
         assert all(w in chain for w in words)
     assert "COLORTERM" in chain and "truecolor" in chain
+    assert "MouseDown2Pane" in chain  # the middle button pastes once, on release
 
 
 def test_failing_tmux_settings_only_warn(

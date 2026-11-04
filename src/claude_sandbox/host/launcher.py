@@ -55,6 +55,9 @@ TMUX_SETTINGS = (
     ("set-option", "-sa", "terminal-features", ",*:RGB"),
     ("set-option", "-g", "set-clipboard", "on"),
     ("set-environment", "-g", "COLORTERM", "truecolor"),
+    # tmux pastes its buffer when the middle button goes down, and the
+    # terminal pastes the selection when it comes up: one paste twice.
+    ("unbind-key", "-n", "MouseDown2Pane"),
 )
 # How long a new tmux server has to start answering.
 SERVER_WAIT = 5.0
