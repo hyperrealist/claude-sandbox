@@ -6,6 +6,7 @@ test_argv.py.
 """
 
 import os
+import resource
 import runpy
 import shlex
 import signal
@@ -114,6 +115,9 @@ def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
         profiles=profiles,
         execve=fake_execve,
         mountinfo=str(tmp_path / "mountinfo"),
+        # Never move the test runner's own limit.
+        getrlimit=lambda _which: (4096, 126020),
+        setrlimit=lambda _which, _limits: None,
         find_tool=lambda name: find_tool(name, search=(str(tools),)),
     )
     (tmp_path / "mountinfo").write_text("")
@@ -310,7 +314,7 @@ def test_sandbox_verify_runs_the_battery_without_the_persistence_check(
 ) -> None:
     argv = shlex.split(fx.run("--sandbox-verify").argv[6])
     assert argv[-2:] == ["/bin/bash", VERIFY_BATTERY]
-    assert capsys.readouterr().err == ""
+    assert "limit" not in capsys.readouterr().err.lower()
     assert fx.refused("--sandbox-verify", "x") == 2
 
 
@@ -701,3 +705,62 @@ def test_dunder_main_dispatches(
         runpy.run_module("claude_sandbox", run_name="__main__")
     assert exc.value.code == 2
     assert "usage:" in capsys.readouterr().err
+
+
+def nproc_host(
+    fx: Fixture, limits: tuple[int, int], *, fail: Exception | None = None
+) -> tuple[shadow.Host, list[tuple[int, tuple[int, int]]]]:
+    calls: list[tuple[int, tuple[int, int]]] = []
+
+    def setrlimit(which: int, new: tuple[int, int]) -> None:
+        calls.append((which, new))
+        if fail is not None:
+            raise fail
+
+    def getrlimit(which: int) -> tuple[int, int]:
+        return limits
+
+    host = replace(fx.host, getrlimit=getrlimit, setrlimit=setrlimit)
+    return host, calls
+
+
+def test_launch_raises_the_soft_nproc_limit_to_the_hard_limit(fx: Fixture) -> None:
+    fx.host, calls = nproc_host(fx, (4096, 126020))
+    fx.run()
+    assert calls == [(resource.RLIMIT_NPROC, (126020, 126020))]
+
+
+def test_nested_launch_raises_it_too(fx: Fixture) -> None:
+    fx.host, calls = nproc_host(fx, (4096, 126020))
+    fx.env["IS_SANDBOX"] = "1"
+    fx.run()
+    assert calls == [(resource.RLIMIT_NPROC, (126020, 126020))]
+
+
+@pytest.mark.parametrize(
+    "limits", [(126020, 126020), (resource.RLIM_INFINITY, resource.RLIM_INFINITY)]
+)
+def test_nproc_limit_left_alone_when_already_at_hard(
+    fx: Fixture, limits: tuple[int, int]
+) -> None:
+    fx.host, calls = nproc_host(fx, limits)
+    fx.run()
+    assert calls == []
+
+
+@pytest.mark.parametrize("error", [PermissionError(1, "no"), ValueError("bad")])
+def test_nproc_setrlimit_failure_does_not_stop_the_launch(
+    fx: Fixture, error: Exception, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fx.host, calls = nproc_host(fx, (4096, 126020), fail=error)
+    ex = fx.run()
+    assert calls and ex.path.endswith("script")
+    assert "limit" not in capsys.readouterr().err.lower()
+
+
+def test_nproc_getrlimit_failure_does_not_stop_the_launch(fx: Fixture) -> None:
+    def broken(_which: int) -> tuple[int, int]:
+        raise OSError(1, "no")
+
+    fx.host = replace(fx.host, getrlimit=broken)
+    fx.run()

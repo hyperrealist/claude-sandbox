@@ -13,6 +13,7 @@ Standard library only: this module is on the launch path (ADR 26).
 
 import glob
 import os
+import resource
 import shlex
 import signal
 import stat
@@ -71,6 +72,8 @@ SHIM = (
 )
 
 ExecVE = Callable[[str, list[str], Mapping[str, str]], NoReturn]
+GetRlimit = Callable[[int], tuple[int, int]]
+SetRlimit = Callable[[int, tuple[int, int]], None]
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,8 @@ class Host:
     execve: ExecVE = os.execve
     find_tool: Callable[[str], str | None] = find_tool
     mountinfo: str = "/proc/self/mountinfo"
+    getrlimit: GetRlimit = resource.getrlimit
+    setrlimit: SetRlimit = resource.setrlimit
 
 
 INSTALLED = Host()
@@ -117,6 +122,7 @@ def run(
     argv0: str, args: Sequence[str], env: Mapping[str, str], host: Host = INSTALLED
 ) -> NoReturn:
     """One launch, in order. Ends in an exec or an exit."""
+    raise_nproc_limit(host)
     env = dict(env)
     profile = host.profiles[detect_agent(argv0, env.get("CLAUDE_SANDBOX_AGENT", ""))]
     args, verify = _sandbox_verify(args)
@@ -186,6 +192,27 @@ def run(
 
 
 # --- the steps, in order ----------------------------------------------------
+
+
+def raise_nproc_limit(host: Host) -> None:
+    """Raise the soft RLIMIT_NPROC to the hard limit, for the jail and all it
+    starts (rlimits survive exec, so every route that passes through ``run``
+    inherits it).
+
+    The jail runs as root with every capability dropped, so root is not
+    exempt from the limit. The kernel counts every task of the real user
+    against it, not only the jail's: with rootless podman that is all of the
+    host user's processes, so a low inherited soft limit makes thread and
+    process creation fail with EAGAIN while the jail runs few tasks (issue
+    #117). Only the soft limit moves, and never down or above the hard limit.
+    The count stays shared with the user's other processes; this removes an
+    arbitrary ceiling, it does not isolate the jail. A refusal leaves the
+    limit as it was: the jail must still start.
+    """
+    with suppress(OSError, ValueError):
+        soft, hard = host.getrlimit(resource.RLIMIT_NPROC)
+        if soft != hard and soft != resource.RLIM_INFINITY:
+            host.setrlimit(resource.RLIMIT_NPROC, (hard, hard))
 
 
 def original_environ(path: str = "/proc/self/environ") -> dict[str, str]:
